@@ -19,6 +19,7 @@ package kubeconfigpath
 
 import (
 	"fmt"
+    "os"
 
 	"github.com/spf13/cobra"
 
@@ -44,7 +45,7 @@ func NewCommand() *cobra.Command {
 	cmd.Flags().StringVar(
 		&flags.Name,
 		"name",
-		"1",
+		os.Getenv("USER"),
 		"the cluster context name",
 	)
 	return cmd

@@ -18,6 +18,7 @@ limitations under the License.
 package cluster
 
 import (
+    "os"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -44,7 +45,7 @@ func NewCommand() *cobra.Command {
 			run(flags, cmd, args)
 		},
 	}
-	cmd.Flags().StringVar(&flags.Name, "name", "1", "the cluster context name")
+	cmd.Flags().StringVar(&flags.Name, "name", os.Getenv("USER"), "the cluster context name")
 	cmd.Flags().StringVar(&flags.Config, "config", "", "path to a kind config file")
 	cmd.Flags().StringVar(&flags.ImageName, "image", "", "node docker image to use for booting the cluster")
 	return cmd

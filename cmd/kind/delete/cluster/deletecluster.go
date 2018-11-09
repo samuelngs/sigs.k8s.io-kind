@@ -18,6 +18,7 @@ limitations under the License.
 package cluster
 
 import (
+    "os"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -40,13 +41,14 @@ func NewCommand() *cobra.Command {
 			run(flags, cmd, args)
 		},
 	}
-	cmd.Flags().StringVar(&flags.Name, "name", "1", "the cluster name")
+	cmd.Flags().StringVar(&flags.Name, "name", os.Getenv("USER"), "the cluster name")
 	return cmd
 }
 
 func run(flags *flags, cmd *cobra.Command, args []string) {
 	// TODO(bentheelder): make this more configurable
 	ctx, err := cluster.NewContext(flags.Name)
+    log.Println("lol", flags.Name)
 	if err != nil {
 		log.Fatalf("Failed to create cluster context! %v", err)
 	}
