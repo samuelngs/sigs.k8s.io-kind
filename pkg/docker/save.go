@@ -14,10 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package config implements the current apiVersion of the `kind` Config
-// along with some common abstractions
-//
-// +k8s:deepcopy-gen=package
-// +k8s:conversion-gen=sigs.k8s.io/kind/pkg/cluster/config
-// +k8s:defaulter-gen=TypeMeta
-package config
+package docker
+
+import (
+	"sigs.k8s.io/kind/pkg/exec"
+)
+
+// Save saves image to dest, as in `docker save`
+func Save(image, dest string) error {
+	return exec.Command("docker", "save", "-o", dest, image).Run()
+}

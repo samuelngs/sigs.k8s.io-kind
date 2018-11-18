@@ -14,10 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package config implements the current apiVersion of the `kind` Config
-// along with some common abstractions
-//
-// +k8s:deepcopy-gen=package
-// +k8s:conversion-gen=sigs.k8s.io/kind/pkg/cluster/config
-// +k8s:defaulter-gen=TypeMeta
-package config
+package cluster
+
+import (
+	"github.com/pkg/errors"
+
+	"sigs.k8s.io/kind/pkg/cluster/nodes"
+)
+
+// List returns a list of clusters for which node containers exist
+func List() ([]Context, error) {
+	n, err := nodes.ListByCluster()
+	if err != nil {
+		return nil, errors.Wrap(err, "could not list clusters, failed to list nodes")
+	}
+	clusters := []Context{}
+	for name := range n {
+		clusters = append(clusters, *newContextNoValidation(name))
+	}
+	return clusters, nil
+}

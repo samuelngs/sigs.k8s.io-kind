@@ -25,19 +25,18 @@ import (
 	"strings"
 	"time"
 
+	"sigs.k8s.io/kind/pkg/cluster/consts"
+
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/kind/pkg/cluster/config"
 	"sigs.k8s.io/kind/pkg/cluster/kubeadm"
+	"sigs.k8s.io/kind/pkg/cluster/nodes"
 	"sigs.k8s.io/kind/pkg/docker"
-	"sigs.k8s.io/kind/pkg/exec"
 	"sigs.k8s.io/kind/pkg/kustomize"
 	logutil "sigs.k8s.io/kind/pkg/log"
 )
-
-// ClusterLabelKey is applied to each "node" docker container for identification
-const ClusterLabelKey = "io.k8s.sigs.kind.cluster"
 
 // Context is used to create / manipulate kubernetes-in-docker clusters
 type Context struct {
@@ -54,6 +53,9 @@ var validNameRE = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 // NewContext returns a new cluster management context
 // if name is "" the default ("1") will be used
 func NewContext(name string) (ctx *Context, err error) {
+	// TODO(bentheelder): move validation out of NewContext and into create type
+	// calls, so that EG delete still works on previously valid, now invalid
+	// names if kind updates
 	if name == "" {
 		name = "1"
 	}
@@ -64,15 +66,23 @@ func NewContext(name string) (ctx *Context, err error) {
 			name, validNameRE.String(),
 		)
 	}
+	return newContextNoValidation(name), nil
+}
+
+// internal helper that does the actual allocation consitently, but does not
+// validate the cluster name
+// we need this so that if we tighten the validation, other internal code
+// can still create contexts to existing clusters by name (see List())
+func newContextNoValidation(name string) *Context {
 	return &Context{
 		name: name,
-	}, nil
+	}
 }
 
 // ClusterLabel returns the docker object label that will be applied
 // to cluster "node" containers
 func (c *Context) ClusterLabel() string {
-	return fmt.Sprintf("%s=%s", ClusterLabelKey, c.name)
+	return fmt.Sprintf("%s=%s", consts.ClusterLabelKey, c.name)
 }
 
 // Name returns the context's name
@@ -110,7 +120,11 @@ func (c *Context) Create(cfg *config.Config) error {
 	c.status.MaybeWrapLogrus(log.StandardLogger())
 
 	defer c.status.End(false)
-	c.status.Start(fmt.Sprintf("Ensuring node image (%s) 🖼", cfg.Image))
+	image := cfg.Image
+	if strings.Contains(image, "@sha256:") {
+		image = strings.Split(image, "@sha256:")[0]
+	}
+	c.status.Start(fmt.Sprintf("Ensuring node image (%s) 🖼", image))
 
 	// attempt to explicitly pull the image if it doesn't exist locally
 	// we don't care if this errors, we'll still try to run which also pulls
@@ -140,11 +154,11 @@ func (c *Context) Create(cfg *config.Config) error {
 
 // Delete tears down a kubernetes-in-docker cluster
 func (c *Context) Delete() error {
-	nodes, err := c.ListNodes(true)
+	n, err := c.ListNodes()
 	if err != nil {
 		return fmt.Errorf("error listing nodes: %v", err)
 	}
-	return c.deleteNodes(nodes...)
+	return nodes.Delete(n...)
 }
 
 // provisionControlPlane provisions the control plane node
@@ -155,7 +169,7 @@ func (c *Context) provisionControlPlane(
 ) (kubeadmConfigPath string, err error) {
 	c.status.Start(fmt.Sprintf("[%s] Creating node container 📦", nodeName))
 	// create the "node" container (docker run, but it is paused, see createNode)
-	node, port, err := createControlPlaneNode(nodeName, cfg.Image, c.ClusterLabel())
+	node, port, err := nodes.CreateControlPlaneNode(nodeName, cfg.Image, c.ClusterLabel())
 	if err != nil {
 		return "", err
 	}
@@ -167,14 +181,14 @@ func (c *Context) provisionControlPlane(
 	if err := node.FixMounts(); err != nil {
 		// TODO(bentheelder): logging here
 		// TODO(bentheelder): add a flag to retain the broken nodes for debugging
-		c.deleteNodes(node.nameOrID)
+		nodes.Delete(node)
 		return "", err
 	}
 
 	// run any pre-boot hooks
 	if cfg.ControlPlane != nil && cfg.ControlPlane.NodeLifecycle != nil {
 		for _, hook := range cfg.ControlPlane.NodeLifecycle.PreBoot {
-			if err := node.RunHook(&hook, "preBoot"); err != nil {
+			if err := runHook(node, &hook, "preBoot"); err != nil {
 				return "", err
 			}
 		}
@@ -185,7 +199,7 @@ func (c *Context) provisionControlPlane(
 	if err := node.SignalStart(); err != nil {
 		// TODO(bentheelder): logging here
 		// TODO(bentheelder): add a flag to retain the broken nodes for debugging
-		c.deleteNodes(node.nameOrID)
+		nodes.Delete(node)
 		return "", err
 	}
 
@@ -194,7 +208,7 @@ func (c *Context) provisionControlPlane(
 	if !node.WaitForDocker(time.Now().Add(time.Second * 30)) {
 		// TODO(bentheelder): logging here
 		// TODO(bentheelder): add a flag to retain the broken nodes for debugging
-		c.deleteNodes(node.nameOrID)
+		nodes.Delete(node)
 		return "", fmt.Errorf("timed out waiting for docker to be ready on node")
 	}
 
@@ -206,7 +220,7 @@ func (c *Context) provisionControlPlane(
 	if err != nil {
 		// TODO(bentheelder): logging here
 		// TODO(bentheelder): add a flag to retain the broken nodes for debugging
-		c.deleteNodes(node.nameOrID)
+		nodes.Delete(node)
 		return "", fmt.Errorf("failed to get kubernetes version from node: %v", err)
 	}
 
@@ -220,7 +234,7 @@ func (c *Context) provisionControlPlane(
 		},
 	)
 	if err != nil {
-		c.deleteNodes(node.nameOrID)
+		nodes.Delete(node)
 		return "", fmt.Errorf("failed to create kubeadm config: %v", err)
 	}
 
@@ -228,14 +242,14 @@ func (c *Context) provisionControlPlane(
 	if err := node.CopyTo(kubeadmConfig, "/kind/kubeadm.conf"); err != nil {
 		// TODO(bentheelder): logging here
 		// TODO(bentheelder): add a flag to retain the broken nodes for debugging
-		c.deleteNodes(node.nameOrID)
+		nodes.Delete(node)
 		return kubeadmConfig, errors.Wrap(err, "failed to copy kubeadm config to node")
 	}
 
 	// run any pre-kubeadm hooks
 	if cfg.ControlPlane != nil && cfg.ControlPlane.NodeLifecycle != nil {
 		for _, hook := range cfg.ControlPlane.NodeLifecycle.PreKubeadm {
-			if err := node.RunHook(&hook, "preKubeadm"); err != nil {
+			if err := runHook(node, &hook, "preKubeadm"); err != nil {
 				return kubeadmConfig, err
 			}
 		}
@@ -247,7 +261,7 @@ func (c *Context) provisionControlPlane(
 			"[%s] Starting Kubernetes (this may take a minute) ☸",
 			nodeName,
 		))
-	if err := node.RunQ(
+	if err := node.Command(
 		// init because this is the control plane node
 		"kubeadm", "init",
 		// preflight errors are expected, in particular for swap being enabled
@@ -255,7 +269,7 @@ func (c *Context) provisionControlPlane(
 		"--ignore-preflight-errors=all",
 		// specify our generated config file
 		"--config=/kind/kubeadm.conf",
-	); err != nil {
+	).Run(); err != nil {
 		// TODO(bentheelder): logging here
 		// TODO(bentheelder): add a flag to retain the broken nodes for debugging
 		return kubeadmConfig, errors.Wrap(err, "failed to init node with kubeadm")
@@ -264,7 +278,7 @@ func (c *Context) provisionControlPlane(
 	// run any post-kubeadm hooks
 	if cfg.ControlPlane != nil && cfg.ControlPlane.NodeLifecycle != nil {
 		for _, hook := range cfg.ControlPlane.NodeLifecycle.PostKubeadm {
-			if err := node.RunHook(&hook, "postKubeadm"); err != nil {
+			if err := runHook(node, &hook, "postKubeadm"); err != nil {
 				return kubeadmConfig, err
 			}
 		}
@@ -279,10 +293,10 @@ func (c *Context) provisionControlPlane(
 	}
 
 	// TODO(bentheelder): support other overlay networks
-	if err = node.RunQ(
+	if err = node.Command(
 		"/bin/sh", "-c",
 		`kubectl apply --kubeconfig=/etc/kubernetes/admin.conf -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version --kubeconfig=/etc/kubernetes/admin.conf | base64 | tr -d '\n')"`,
-	); err != nil {
+	).Run(); err != nil {
 		return kubeadmConfig, errors.Wrap(err, "failed to apply overlay network")
 	}
 
@@ -290,32 +304,61 @@ func (c *Context) provisionControlPlane(
 	// https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/#master-isolation
 	// TODO(bentheelder): put this back when we have multi-node
 	//if cfg.NumNodes == 1 {
-	if err = node.RunQ(
+	if err = node.Command(
 		"kubectl", "--kubeconfig=/etc/kubernetes/admin.conf",
 		"taint", "nodes", "--all", "node-role.kubernetes.io/master-",
-	); err != nil {
+	).Run(); err != nil {
 		return kubeadmConfig, errors.Wrap(err, "failed to remove master taint")
 	}
 	//}
 
 	// add the default storage class
-	if err := node.RunQWithInput(
-		strings.NewReader(defaultStorageClassManifest),
-		"kubectl", "--kubeconfig=/etc/kubernetes/admin.conf", "apply", "-f", "-",
-	); err != nil {
+	if err := addDefaultStorageClass(node); err != nil {
 		return kubeadmConfig, errors.Wrap(err, "failed to add default storage class")
 	}
 
 	// run any post-overlay hooks
 	if cfg.ControlPlane != nil && cfg.ControlPlane.NodeLifecycle != nil {
 		for _, hook := range cfg.ControlPlane.NodeLifecycle.PostSetup {
-			if err := node.RunHook(&hook, "postSetup"); err != nil {
+			if err := runHook(node, &hook, "postSetup"); err != nil {
 				return kubeadmConfig, err
 			}
 		}
 	}
 
 	return kubeadmConfig, nil
+}
+
+func addDefaultStorageClass(controlPlane *nodes.Node) error {
+	in := strings.NewReader(defaultStorageClassManifest)
+	cmd := controlPlane.Command(
+		"kubectl",
+		"--kubeconfig=/etc/kubernetes/admin.conf", "apply", "-f", "-",
+	)
+	cmd.SetStdin(in)
+	return cmd.Run()
+}
+
+// runHook runs a LifecycleHook on the node
+// It will only return an error if hook.MustSucceed is true
+func runHook(node *nodes.Node, hook *config.LifecycleHook, phase string) error {
+	logger := log.WithFields(log.Fields{
+		"node":  node.String(),
+		"phase": phase,
+	})
+	if hook.Name != "" {
+		logger.Infof("Running LifecycleHook \"%s\" ...", hook.Name)
+	} else {
+		logger.Info("Running LifecycleHook ...")
+	}
+	if err := node.Command(hook.Command[0], hook.Command[1:]...).Run(); err != nil {
+		if hook.MustSucceed {
+			logger.WithError(err).Error("LifecycleHook failed")
+			return err
+		}
+		logger.WithError(err).Warn("LifecycleHook failed, continuing ...")
+	}
+	return nil
 }
 
 // createKubeadmConfig creates the kubeadm config file for the cluster
@@ -363,28 +406,7 @@ func stringSliceToByteSliceSlice(ss []string) [][]byte {
 	return bss
 }
 
-func (c *Context) deleteNodes(names ...string) error {
-	cmd := exec.Command("docker", "rm")
-	cmd.Args = append(cmd.Args,
-		"-f", // force the container to be delete now
-		"-v", // delete volumes
-	)
-	cmd.Args = append(cmd.Args, names...)
-	return cmd.Run()
-}
-
 // ListNodes returns the list of container IDs for the "nodes" in the cluster
-func (c *Context) ListNodes(alsoStopped bool) (containerIDs []string, err error) {
-	cmd := exec.Command("docker", "ps")
-	cmd.Args = append(cmd.Args,
-		// quiet output for parsing
-		"-q",
-		// filter for nodes with the cluster label
-		"--filter", "label="+c.ClusterLabel(),
-	)
-	// optionally list nodes that are stopped
-	if alsoStopped {
-		cmd.Args = append(cmd.Args, "-a")
-	}
-	return cmd.CombinedOutputLines()
+func (c *Context) ListNodes() ([]*nodes.Node, error) {
+	return nodes.List("label=" + c.ClusterLabel())
 }

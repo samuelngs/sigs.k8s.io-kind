@@ -14,10 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package config implements the current apiVersion of the `kind` Config
-// along with some common abstractions
-//
-// +k8s:deepcopy-gen=package
-// +k8s:conversion-gen=sigs.k8s.io/kind/pkg/cluster/config
-// +k8s:defaulter-gen=TypeMeta
-package config
+package docker
+
+import (
+	"sigs.k8s.io/kind/pkg/exec"
+)
+
+// Kill sends the named signal to the container
+func Kill(signal, containerNameOrID string) error {
+	cmd := exec.Command(
+		"docker", "kill",
+		"-s", signal,
+		containerNameOrID,
+	)
+	return cmd.Run()
+}

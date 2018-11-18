@@ -17,8 +17,6 @@ limitations under the License.
 package docker
 
 import (
-	"fmt"
-	"regexp"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -62,39 +60,4 @@ func Pull(image string, retries int) error {
 		log.WithError(err).Infof("Failed to pull image: %s", image)
 	}
 	return err
-}
-
-// Save saves image to dest, as in `docker save`
-func Save(image, dest string) error {
-	return exec.Command("docker", "save", "-o", dest, image).Run()
-}
-
-// Docker container IDs are hex, more than one character, and on their own line
-var containerIDRegex = regexp.MustCompile("^[a-f0-9]+$")
-
-// Run creates a container with "docker run", with some error handling
-// it will return the ID of the created container if any, even on error
-func Run(image string, runArgs []string, containerArgs []string) (id string, err error) {
-	cmd := exec.Command("docker", "run")
-	cmd.Args = append(cmd.Args, runArgs...)
-	cmd.Args = append(cmd.Args, image)
-	cmd.Args = append(cmd.Args, containerArgs...)
-	cmd.Debug = true
-	output, err := cmd.CombinedOutputLines()
-	if err != nil {
-		// log error output if there was any
-		for _, line := range output {
-			log.Error(line)
-		}
-		return "", err
-	}
-	// if docker created a container the id will be the first line and match
-	// validate the output and get the id
-	if len(output) < 1 {
-		return "", fmt.Errorf("failed to get container id, received no output from docker run")
-	}
-	if !containerIDRegex.MatchString(output[0]) {
-		return "", fmt.Errorf("failed to get container id, output did not match: %v", output)
-	}
-	return output[0], nil
 }

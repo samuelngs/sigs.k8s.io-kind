@@ -14,10 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package config implements the current apiVersion of the `kind` Config
-// along with some common abstractions
-//
-// +k8s:deepcopy-gen=package
-// +k8s:conversion-gen=sigs.k8s.io/kind/pkg/cluster/config
-// +k8s:defaulter-gen=TypeMeta
-package config
+// Package nodes contains functionality for Kubernetes-in-Docker nodes
+// It mostly exists to break up functionality from sigs.k8s.io/kind/pkg/cluster
+package nodes
